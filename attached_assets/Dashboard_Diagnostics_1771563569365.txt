@@ -1,0 +1,390 @@
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * FILE 3: DASHBOARD & DIAGNOSTICS
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 
+ * CONTENTS:
+ * - Dashboard visualization
+ * - System diagnostics
+ * - Validation tools
+ * - Testing utilities
+ * 
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+// =============================================================================
+// DASHBOARD
+// =============================================================================
+
+function updateDashboard() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const dash = ss.getSheetByName(CONFIG.SHEET.DASHBOARD) || 
+                  ss.insertSheet(CONFIG.SHEET.DASHBOARD);
+    const masterData = getSheet(CONFIG.SHEET.VOCAB_MASTER).getDataRange().getValues();
+    const analysisSheet = ss.getSheetByName(CONFIG.SHEET.ITEM_ANALYSIS);
+    const studentSheet = ss.getSheetByName(CONFIG.SHEET.STUDENT_STATS);
+    
+    // Calculate metrics
+    let totalWords = masterData.length - 1;
+    let masteredCount = 0;
+    let learningCount = 0;
+    
+    masterData.forEach(row => {
+      if (row[CONFIG.COL.LEVEL] >= 5) masteredCount++;
+      else if (row[CONFIG.COL.LEVEL] > 1) learningCount++;
+    });
+    
+    // Gatekeeper words (low accuracy)
+    let gatekeepers = "Loading...";
+    if (analysisSheet && analysisSheet.getLastRow() > 1) {
+      const analysisData = analysisSheet.getDataRange().getValues();
+      gatekeepers = analysisData.slice(1, 4).map(row => `${row[0]} (${row[1]})`).join(", ");
+    }
+    
+    // Leaderboard
+    let leaderboard = [["No data yet", "-", "-"]];
+    if (studentSheet && studentSheet.getLastRow() > 1) {
+      const studentData = studentSheet.getDataRange().getValues();
+      leaderboard = studentData.slice(1)
+        .filter(row => row[0] && row[2])
+        .sort((a, b) => {
+          let accA = parseFloat(a[2]);
+          let accB = parseFloat(b[2]);
+          if (accB !== accA) return accB - accA;
+          return parseFloat(b[3]) - parseFloat(a[3]);
+        })
+        .slice(0, 3)
+        .map((row, i) => {
+          let email = row[0].toString();
+          let anon = email.split('@')[0].substring(0, 2) + "****";
+          return [`RANK ${i + 1}: ${anon}`, row[2], "GRANDMASTER"];
+        });
+    }
+    
+    // Build layout
+    dash.clear();
+    let layout = [
+      ["NORTH BEND HS - ELA COMMAND CENTER", "", ""],
+      ["", "", ""],
+      ["SYSTEM METRICS", "VALUE", "CONTEXT"],
+      ["TOTAL WORDS IN SYSTEM", totalWords, "The Roster"],
+      ["WORDS MASTERED (LVL 5)", masteredCount, "Season Wins"],
+      ["WORDS IN PROGRESS", learningCount, "In Training"],
+      ["", "", ""],
+      ["RED ALERT: RE-TEACH THESE", gatekeepers || "None!", "Priority 1"],
+      ["", "", ""],
+      ["TOP PERFORMERS (GRANDMASTER TIER)", "ACCURACY", "RANK"],
+      ...leaderboard,
+      ["", "", ""],
+      ["LAST UPDATED", new Date().toLocaleString(), "System Clock"]
+    ];
+    
+    dash.getRange(1, 1, layout.length, 3).setValues(layout);
+    
+    // Formatting
+    dash.getRange("A1:C1")
+      .merge()
+      .setBackground("#1a1a1a")
+      .setFontColor("#ffffff")
+      .setFontWeight("bold")
+      .setHorizontalAlignment("center");
+    
+    dash.getRange("A3:C3")
+      .setBackground("#4285f4")
+      .setFontColor("white")
+      .setFontWeight("bold");
+    
+    dash.getRange("A10:C10")
+      .setBackground("#fbbc04")
+      .setFontColor("black")
+      .setFontWeight("bold");
+    
+    dash.getRange("A11:C11")
+      .setBackground("#fff2cc")
+      .setFontWeight("bold");
+    
+    dash.setColumnWidth(1, 280);
+    dash.setColumnWidth(2, 120);
+    dash.setColumnWidth(3, 150);
+    
+    SpreadsheetApp.getUi().alert("✅ Dashboard refreshed!");
+    
+  } catch (e) {
+    handleError('updateDashboard', e);
+  }
+}
+
+// =============================================================================
+// DIAGNOSTICS
+// =============================================================================
+
+function diagnosticReport() {
+  try {
+    Logger.log("\n" + "=".repeat(60));
+    Logger.log("DIAGNOSTIC REPORT");
+    Logger.log("=".repeat(60));
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // 1. Check Active Terms
+    Logger.log("\n📋 ACTIVE TERMS CHECK");
+    Logger.log("-".repeat(60));
+    
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const masterData = masterSheet.getDataRange().getValues();
+    
+    let activeTerms = [];
+    for (let i = 1; i < masterData.length; i++) {
+      if (masterData[i][CONFIG.COL.CURRENT_STATUS] === "Active") {
+        activeTerms.push(masterData[i][CONFIG.COL.TERM].toString().trim());
+      }
+    }
+    
+    if (activeTerms.length > 0) {
+      Logger.log(`✅ Found ${activeTerms.length} active terms:`);
+      activeTerms.forEach((term, i) => Logger.log(`   ${i + 1}. ${term}`));
+    } else {
+      Logger.log(`⚠️ No active terms. Run form sync first.`);
+    }
+    
+    // 2. Check Response Sheet
+    Logger.log("\n📊 RESPONSE SHEET");
+    Logger.log("-".repeat(60));
+    
+    let respSheet = ss.getSheets().find(s => s.getFormUrl());
+    
+    if (!respSheet) {
+      Logger.log("❌ No response sheet found");
+    } else {
+      Logger.log(`✅ Sheet: ${respSheet.getName()}`);
+      Logger.log(`   Rows: ${respSheet.getLastRow()}`);
+      Logger.log(`   Columns: ${respSheet.getLastColumn()}`);
+      
+      if (respSheet.getLastColumn() > 50) {
+        Logger.log(`   ⚠️ WARNING: ${respSheet.getLastColumn()} columns (proliferation)`);
+      }
+      
+      if (respSheet.getLastRow() > 1 && activeTerms.length > 0) {
+        const headers = respSheet.getRange(1, 1, 1, respSheet.getLastColumn()).getValues()[0];
+        
+        Logger.log("\n🔗 TERM MATCHING");
+        activeTerms.forEach(term => {
+          const found = headers.some(h => h.toString() === `Confidence: ${term}`);
+          Logger.log(`   ${found ? '✅' : '❌'} ${term}`);
+        });
+      }
+    }
+    
+    // 3. Check System Health
+    Logger.log("\n💚 SYSTEM HEALTH");
+    Logger.log("-".repeat(60));
+    
+    const requiredSheets = [
+      CONFIG.SHEET.VOCAB_MASTER,
+      CONFIG.SHEET.QUESTION_BANK,
+      CONFIG.SHEET.STUDENT_PROGRESS,
+      CONFIG.SHEET.SYSTEM_CONFIG
+    ];
+    
+    requiredSheets.forEach(name => {
+      const exists = ss.getSheetByName(name);
+      Logger.log(`   ${exists ? '✅' : '❌'} ${name}`);
+    });
+    
+    Logger.log("\n" + "=".repeat(60));
+    Logger.log("END OF REPORT");
+    Logger.log("=".repeat(60));
+    
+    SpreadsheetApp.getUi().alert('Diagnostic complete! Check View → Logs');
+    
+  } catch (e) {
+    handleError('diagnosticReport', e);
+  }
+}
+
+function showSystemDiagnostics() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const progressSheet = ss.getSheetByName(CONFIG.SHEET.STUDENT_PROGRESS);
+    
+    const totalWords = masterSheet.getLastRow() - 1;
+    const totalAttempts = progressSheet ? progressSheet.getLastRow() - 1 : 0;
+    
+    // Count by level
+    const data = masterSheet.getDataRange().getValues();
+    let levelCounts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    
+    for (let i = 1; i < data.length; i++) {
+      const level = data[i][CONFIG.COL.LEVEL] || 1;
+      levelCounts[level] = (levelCounts[level] || 0) + 1;
+    }
+    
+    const report = `
+📊 SYSTEM DIAGNOSTICS
+
+Total Words: ${totalWords}
+Total Attempts: ${totalAttempts}
+
+Words by Level:
+  Level 1 (New): ${levelCounts[1]}
+  Level 2: ${levelCounts[2]}
+  Level 3: ${levelCounts[3]}
+  Level 4 (Boss): ${levelCounts[4]}
+  Level 5 (Mastered): ${levelCounts[5]}
+
+Health: ${progressSheet ? '✅ Active' : '⚠️ No Data'}
+`;
+    
+    Logger.log(report);
+    SpreadsheetApp.getUi().alert(report);
+    
+  } catch (e) {
+    handleError('showSystemDiagnostics', e);
+  }
+}
+
+function validateSystemSetup() {
+  try {
+    Logger.log('\n═══ SYSTEM VALIDATION ═══\n');
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let issues = [];
+    
+    // Check sheets
+    const required = [
+      CONFIG.SHEET.VOCAB_MASTER,
+      CONFIG.SHEET.QUESTION_BANK,
+      CONFIG.SHEET.STUDENT_PROGRESS,
+      CONFIG.SHEET.SYSTEM_CONFIG
+    ];
+    
+    required.forEach(name => {
+      if (!ss.getSheetByName(name)) {
+        issues.push(`Missing: ${name}`);
+      }
+    });
+    
+    // Check Vocab_Master structure
+    const masterSheet = ss.getSheetByName(CONFIG.SHEET.VOCAB_MASTER);
+    if (masterSheet) {
+      if (masterSheet.getLastColumn() < 13) {
+        issues.push("Vocab_Master missing Phase 1.1 columns");
+      }
+    }
+    
+    // Report
+    if (issues.length === 0) {
+      Logger.log('✅ All systems operational!');
+      SpreadsheetApp.getUi().alert('✅ Validation Passed\n\nAll systems operational.');
+    } else {
+      Logger.log('❌ ISSUES:');
+      issues.forEach(i => Logger.log(`  - ${i}`));
+      
+      SpreadsheetApp.getUi().alert(
+        '❌ Validation Failed\n\n' + issues.join('\n') + '\n\nRun Initial Setup.'
+      );
+    }
+    
+  } catch (e) {
+    handleError('validateSystemSetup', e);
+  }
+}
+
+// =============================================================================
+// TESTING UTILITIES
+// =============================================================================
+
+function testSM2Algorithm() {
+  try {
+    Logger.log("\n=== SM-2 ALGORITHM TEST ===\n");
+    
+    // Test scenarios
+    const tests = [
+      { name: "Perfect recall", quality: 5, streak: 2, ef: 2.5, prev: 6 },
+      { name: "Good recall", quality: 4, streak: 3, ef: 2.3, prev: 14 },
+      { name: "Difficult recall", quality: 3, streak: 1, ef: 2.0, prev: 6 },
+      { name: "Forgot", quality: 2, streak: 5, ef: 1.8, prev: 30 }
+    ];
+    
+    tests.forEach(t => {
+      const result = calculateSM2Interval(t.quality, t.streak, t.ef, t.prev);
+      Logger.log(`${t.name}:`);
+      Logger.log(`  Input: Q=${t.quality}, Streak=${t.streak}, EF=${t.ef}, Prev=${t.prev}d`);
+      Logger.log(`  Output: Interval=${result.interval}d, EF=${result.newEF.toFixed(2)}, Streak=${result.newStreak}\n`);
+    });
+    
+    SpreadsheetApp.getUi().alert('Test complete! Check View → Logs');
+    
+  } catch (e) {
+    handleError('testSM2Algorithm', e);
+  }
+}
+
+function showReviewSchedule() {
+  try {
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const data = masterSheet.getDataRange().getValues();
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    let schedule = { overdue: [], today: [], soon: [], later: [] };
+    
+    for (let i = 1; i < data.length; i++) {
+      const term = data[i][CONFIG.COL.TERM];
+      const nextReview = data[i][CONFIG.COL.NEXT_REVIEW];
+      const level = data[i][CONFIG.COL.LEVEL] || 1;
+      
+      if (!nextReview) continue;
+      
+      const reviewDate = new Date(nextReview);
+      reviewDate.setHours(0, 0, 0, 0);
+      const daysDiff = Math.floor((reviewDate - today) / (1000 * 60 * 60 * 24));
+      
+      if (daysDiff < 0) schedule.overdue.push(`${term} (L${level})`);
+      else if (daysDiff === 0) schedule.today.push(`${term} (L${level})`);
+      else if (daysDiff <= 7) schedule.soon.push(`${term} (L${level}, ${daysDiff}d)`);
+      else schedule.later.push(`${term} (L${level}, ${daysDiff}d)`);
+    }
+    
+    Logger.log("\n=== REVIEW SCHEDULE ===\n");
+    Logger.log(`Overdue (${schedule.overdue.length}): ${schedule.overdue.join(', ') || 'None'}`);
+    Logger.log(`Due Today (${schedule.today.length}): ${schedule.today.join(', ') || 'None'}`);
+    Logger.log(`Due Soon (${schedule.soon.length}): ${schedule.soon.slice(0, 10).join(', ')}`);
+    Logger.log(`Due Later (${schedule.later.length}): ${schedule.later.slice(0, 10).join(', ')}`);
+    
+    SpreadsheetApp.getUi().alert('Schedule complete! Check View → Logs');
+    
+  } catch (e) {
+    handleError('showReviewSchedule', e);
+  }
+}
+
+function compareSpacingMethods() {
+  try {
+    Logger.log("\n=== SPACING METHOD COMPARISON ===\n");
+    
+    Logger.log("Old Method (Exponential):");
+    for (let level = 1; level <= 5; level++) {
+      const interval = Math.pow(2, level) * 2;
+      Logger.log(`  Level ${level}: ${interval} days`);
+    }
+    
+    Logger.log("\nNew Method (SM-2):");
+    Logger.log("  Adaptive based on performance");
+    Logger.log("  Level 1: 1 day");
+    Logger.log("  Level 2: 6 days");
+    Logger.log("  Level 3+: EF × previous (varies by accuracy)");
+    Logger.log("\nExample progression:");
+    Logger.log("  Perfect: 1d → 6d → 18d → 54d");
+    Logger.log("  Good: 1d → 6d → 14d → 28d");
+    Logger.log("  Struggling: 1d → 1d → 6d → 10d");
+    
+    SpreadsheetApp.getUi().alert('Comparison complete! Check View → Logs');
+    
+  } catch (e) {
+    handleError('compareSpacingMethods', e);
+  }
+}

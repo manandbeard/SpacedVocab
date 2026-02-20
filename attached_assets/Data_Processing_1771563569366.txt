@@ -1,0 +1,970 @@
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * FILE 2: DATA PROCESSING ENGINE
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 
+ * CONTENTS:
+ * - Phase 1.1: Data Model Setup
+ * - Phase 1.2: SM-2 Algorithm
+ * - Form Response Processing (FIXED)
+ * - Phase 2.3: Adaptive Selection
+ * 
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+// =============================================================================
+// PHASE 1.1: DATA MODEL INITIALIZATION
+// =============================================================================
+
+/**
+ * ONE-TIME SETUP: Initialize enhanced data model
+ * Safe to run multiple times (idempotent)
+ */
+function initializeEnhancedDataModel() {
+  try {
+    Logger.log('═══════════════════════════════════════');
+    Logger.log('PHASE 1.1 SETUP - Enhanced Data Model');
+    Logger.log('═══════════════════════════════════════\n');
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    enhanceVocabMaster(ss);
+    createStudentProgressSheet(ss);
+    createSystemConfigSheet(ss);
+    
+    Logger.log('\n✅ Phase 1.1 Setup Complete!');
+    
+    try {
+      SpreadsheetApp.getUi().alert(
+        '✅ Setup Complete!\n\nPhase 1.1 installed.\n\nRun "System Health" to verify.'
+      );
+    } catch (e) {
+      Logger.log('(Run from menu for visual confirmation)');
+    }
+    
+  } catch (e) {
+    handleError('initializeEnhancedDataModel', e);
+  }
+}
+
+function enhanceVocabMaster(ss) {
+  const sheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+  const lastCol = sheet.getLastColumn();
+  
+  if (lastCol >= 13 && sheet.getRange(1, 8).getValue() === "Total_Attempts") {
+    Logger.log('✓ Vocab_Master already enhanced');
+    return;
+  }
+  
+  const headers = [
+    ["Total_Attempts", "Total_Correct", "Easiness_Factor", 
+     "Consecutive_Correct", "Last_Attempt_Date", "First_Learned_Date"]
+  ];
+  sheet.getRange(1, 8, 1, 6).setValues(headers);
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    const defaults = [];
+    for (let i = 2; i <= lastRow; i++) {
+      defaults.push([0, 0, 2.5, 0, "", ""]);
+    }
+    sheet.getRange(2, 8, defaults.length, 6).setValues(defaults);
+    sheet.getRange(2, 10, lastRow - 1, 1).setNumberFormat("0.00");
+    sheet.getRange(2, 12, lastRow - 1, 2).setNumberFormat("yyyy-MM-dd");
+  }
+  
+  Logger.log('✓ Enhanced Vocab_Master with columns H-M');
+}
+
+function createStudentProgressSheet(ss) {
+  let sheet = ss.getSheetByName(CONFIG.SHEET.STUDENT_PROGRESS);
+  if (sheet) {
+    Logger.log('✓ Student_Progress exists');
+    return;
+  }
+  
+  sheet = ss.insertSheet(CONFIG.SHEET.STUDENT_PROGRESS);
+  sheet.getRange(1, 1, 1, 8).setValues([[
+    "Student_Email", "Term", "Attempt_Date", "Question_Type",
+    "Correct", "Confidence", "Response_Time_Sec", "Term_Level_At_Attempt"
+  ]]);
+  
+  sheet.getRange(1, 1, 1, 8)
+    .setBackground("#4285f4")
+    .setFontColor("white")
+    .setFontWeight("bold");
+  sheet.setFrozenRows(1);
+  
+  Logger.log('✓ Created Student_Progress');
+}
+
+function createSystemConfigSheet(ss) {
+  let sheet = ss.getSheetByName(CONFIG.SHEET.SYSTEM_CONFIG);
+  if (sheet) {
+    Logger.log('✓ System_Config exists');
+    return;
+  }
+  
+  sheet = ss.insertSheet(CONFIG.SHEET.SYSTEM_CONFIG);
+  
+  const config = [
+    ["PARAMETER", "VALUE", "DESCRIPTION"],
+    ["", "", ""],
+    ["=== SM-2 ALGORITHM ===", "", ""],
+    ["MIN_EASINESS_FACTOR", 1.3, "Minimum EF"],
+    ["MAX_EASINESS_FACTOR", 2.5, "Maximum EF"],
+    ["CORRECT_BONUS", 0.1, "EF increase when correct"],
+    ["INCORRECT_PENALTY", 0.2, "EF decrease when incorrect"],
+    ["", "", ""],
+    ["=== QUIZ SETTINGS ===", "", ""],
+    ["VOCAB_QUESTIONS_PER_QUIZ", 6, "Vocab per quiz"],
+    ["GRAMMAR_QUESTIONS_PER_QUIZ", 2, "Grammar per quiz"],
+    ["BOSS_MODE_LEVEL", 4, "Level for Short Answer"],
+    ["MASTERY_LEVEL", 5, "Mastery threshold"],
+    ["", "", ""],
+    ["=== ADAPTIVE SELECTION ===", "", ""],
+    ["LEECH_THRESHOLD", 3, "Attempts before leech"],
+    ["STRUGGLING_ACCURACY", 60, "Below % = struggling"],
+    ["PRIORITY_BOOST_DAYS", 2, "Overdue urgency"],
+    ["", "", ""],
+    ["=== GRADING ===", "", ""],
+    ["FUZZY_MATCH_THRESHOLD", 85, "Typo tolerance %"],
+    ["TYPO_TOLERANCE", 2, "Max char differences"]
+  ];
+  
+  sheet.getRange(1, 1, config.length, 3).setValues(config);
+  sheet.getRange(1, 1, 1, 3).setBackground("#34a853").setFontColor("white").setFontWeight("bold");
+  
+  Logger.log('✓ Created System_Config');
+}
+
+// =============================================================================
+// PHASE 1.2: SM-2 ALGORITHM
+// =============================================================================
+
+/**
+ * Calculate next review interval using SM-2
+ */
+function calculateSM2Interval(quality, currentStreak, easinessFactor, previousInterval) {
+  const minEF = getConfig("MIN_EASINESS_FACTOR", 1.3);
+  const maxEF = getConfig("MAX_EASINESS_FACTOR", 2.5);
+  
+  let newEF = easinessFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
+  newEF = Math.max(minEF, Math.min(maxEF, newEF));
+  
+  let newStreak = quality >= 3 ? currentStreak + 1 : 0;
+  let interval;
+  
+  if (quality < 3) {
+    interval = 1;
+  } else if (newStreak === 1) {
+    interval = 1;
+  } else if (newStreak === 2) {
+    interval = 6;
+  } else {
+    interval = Math.round(previousInterval * newEF);
+  }
+  
+  return { interval, newEF, newStreak };
+}
+
+/**
+ * Convert performance to SM-2 quality rating (0-5)
+ */
+function performanceToQuality(isCorrect, confidence, questionType) {
+  let quality;
+  
+  if (isCorrect) {
+    if (confidence === 5) quality = 5;
+    else if (confidence === 4) quality = 4;
+    else quality = 3;
+  } else {
+    if (confidence >= 4) quality = 2;
+    else if (confidence === 3) quality = 1;
+    else quality = 0;
+  }
+  
+  if (questionType === "SA") quality = Math.min(5, quality + 0.5);
+  
+  return quality;
+}
+
+/**
+ * Update a term with SM-2 calculations
+ */
+function updateTermWithSM2(term, isCorrect, confidence, questionType) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const data = masterSheet.getDataRange().getValues();
+    
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][CONFIG.COL.TERM].toString().toLowerCase() === term.toLowerCase()) {
+        const row = i + 1;
+        
+        const attempts = data[i][CONFIG.COL.TOTAL_ATTEMPTS] || 0;
+        const correct = data[i][CONFIG.COL.TOTAL_CORRECT] || 0;
+        const streak = data[i][CONFIG.COL.CONSECUTIVE_CORRECT] || 0;
+        const ef = data[i][CONFIG.COL.EASINESS_FACTOR] || 2.5;
+        const prevInterval = 1;
+        
+        const quality = performanceToQuality(isCorrect, confidence, questionType);
+        const sm2 = calculateSM2Interval(quality, streak, ef, prevInterval);
+        
+        const nextReview = new Date();
+        nextReview.setDate(nextReview.getDate() + sm2.interval);
+        
+        const newLevel = Math.min(5, Math.floor(sm2.newStreak / 2) + 1);
+        
+        masterSheet.getRange(row, CONFIG.COL.TOTAL_ATTEMPTS + 1).setValue(attempts + 1);
+        masterSheet.getRange(row, CONFIG.COL.TOTAL_CORRECT + 1).setValue(correct + (isCorrect ? 1 : 0));
+        masterSheet.getRange(row, CONFIG.COL.EASINESS_FACTOR + 1).setValue(sm2.newEF);
+        masterSheet.getRange(row, CONFIG.COL.CONSECUTIVE_CORRECT + 1).setValue(sm2.newStreak);
+        masterSheet.getRange(row, CONFIG.COL.LAST_ATTEMPT_DATE + 1).setValue(new Date());
+        masterSheet.getRange(row, CONFIG.COL.LEVEL + 1).setValue(newLevel);
+        masterSheet.getRange(row, CONFIG.COL.NEXT_REVIEW + 1).setValue(nextReview);
+        
+        Logger.log(`✅ SM-2 Update for "${term}":`);
+        Logger.log(`   Quality: ${quality}/5 | Interval: ${sm2.interval} days | New EF: ${sm2.newEF.toFixed(2)} | Streak: ${sm2.newStreak}`);
+        Logger.log(`   Next Review: ${nextReview.toDateString()}`);
+        
+        return;
+      }
+    }
+    
+    Logger.log(`⚠️ Term not found: ${term}`);
+    
+  } catch (e) {
+    Logger.log(`Error updating ${term}: ${e.message}`);
+  }
+}
+
+/**
+ * Get current stats for a term
+ */
+function getTermStats(term) {
+  try {
+    const data = getSheet(CONFIG.SHEET.VOCAB_MASTER).getDataRange().getValues();
+    
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][CONFIG.COL.TERM].toString().toLowerCase() === term.toLowerCase()) {
+        return {
+          term: data[i][CONFIG.COL.TERM],
+          level: data[i][CONFIG.COL.LEVEL] || 1,
+          attempts: data[i][CONFIG.COL.TOTAL_ATTEMPTS] || 0,
+          correct: data[i][CONFIG.COL.TOTAL_CORRECT] || 0,
+          easinessFactor: data[i][CONFIG.COL.EASINESS_FACTOR] || 2.5,
+          streak: data[i][CONFIG.COL.CONSECUTIVE_CORRECT] || 0,
+          rowIndex: i + 1
+        };
+      }
+    }
+    return null;
+  } catch (e) {
+    Logger.log(`Error getting stats for ${term}: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Log student attempt to Student_Progress
+ */
+function logStudentAttempt(email, term, questionType, isCorrect, confidence, termLevel) {
+  try {
+    const sheet = getSheet(CONFIG.SHEET.STUDENT_PROGRESS);
+    sheet.appendRow([
+      email,
+      term,
+      new Date(),
+      questionType,
+      isCorrect,
+      confidence,
+      0,
+      termLevel
+    ]);
+  } catch (e) {
+    Logger.log(`Error logging attempt: ${e.message}`);
+  }
+}
+
+/**
+ * Fuzzy string matching for typo tolerance
+ */
+function levenshteinMatch(str1, str2, threshold) {
+  const distance = levenshteinDistance(str1.toLowerCase(), str2.toLowerCase());
+  const maxLen = Math.max(str1.length, str2.length);
+  const similarity = ((maxLen - distance) / maxLen) * 100;
+  return similarity >= threshold;
+}
+
+function levenshteinDistance(str1, str2) {
+  const matrix = [];
+  
+  for (let i = 0; i <= str2.length; i++) {
+    matrix[i] = [i];
+  }
+  
+  for (let j = 0; j <= str1.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  for (let i = 1; i <= str2.length; i++) {
+    for (let j = 1; j <= str1.length; j++) {
+      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  
+  return matrix[str2.length][str1.length];
+}
+
+// =============================================================================
+// FORM RESPONSE PROCESSING (FIXED - DEFENSIVE VERSION)
+// =============================================================================
+
+/**
+ * Process form responses with SM-2 - DEFENSIVE VERSION
+ * Uses "Active" flag from Vocab_Master as source of truth
+ */
+function processFormResponsesWithSM2_Defensive() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // FIX #3: Copy to static sheet first
+    copyResponsesToStaticSheet();
+    
+    // Get term order
+    const orderSheet = ss.getSheetByName("Quiz_Term_Order");
+    if (!orderSheet || orderSheet.getLastRow() < 2) {
+      throw new Error("Quiz_Term_Order not found. Run form sync first.");
+    }
+    
+    const termOrderStr = orderSheet.getRange(2, 2).getValue();
+    const activeTerms = termOrderStr.split(",").map(t => t.trim());
+    
+    Logger.log(`\n=== PROCESSING RESPONSES (ALL FIXES ACTIVE) ===`);
+    Logger.log(`Terms: ${activeTerms.join(', ')}`);
+    
+    // Get static sheet
+    const staticSheet = ss.getSheetByName("Static_Quiz_Responses");
+    if (!staticSheet || staticSheet.getLastRow() < 2) {
+      Logger.log("No responses yet");
+      return;
+    }
+    
+    const staticData = staticSheet.getDataRange().getValues();
+    
+    // FIX #2: Process only latest per student
+    const latestResponses = getLatestResponsePerStudent(staticData);
+    
+    Logger.log(`Total rows: ${staticData.length - 1}`);
+    Logger.log(`Unique students: ${latestResponses.length}`);
+    
+    let sStats = {};
+    let processedTerms = new Set();
+    
+    latestResponses.forEach(response => {
+      const rowData = response.data;
+      const email = rowData[1];
+      
+      if (!sStats[email]) {
+        sStats[email] = { correct: 0, total: 0, conf: 0, last: rowData[0] };
+      }
+      
+      activeTerms.forEach((term, termIndex) => {
+        const answerCol = 2 + (termIndex * 2);
+        const confCol = answerCol + 1;
+        
+        if (answerCol >= rowData.length) return;
+        
+        const answer = rowData[answerCol].toString().trim().toLowerCase();
+        const confidence = parseInt(rowData[confCol]) || 3;
+        
+        const termStats = getTermStats(term);
+        const questionType = (termStats && termStats.level >= 4) ? "SA" : "MC";
+        
+        let isCorrect = false;
+        if (questionType === "SA") {
+          isCorrect = (answer === term.toLowerCase() || 
+                       levenshteinMatch(answer, term.toLowerCase(), 85));
+        } else {
+          const bankSheet = getSheet(CONFIG.SHEET.QUESTION_BANK);
+          const bankData = bankSheet.getDataRange().getValues();
+          const bankEntry = bankData.find(row => 
+            row[0].toString().toLowerCase() === term.toLowerCase()
+          );
+          if (bankEntry) {
+            isCorrect = (answer === bankEntry[6].toString().trim().toLowerCase());
+          }
+        }
+        
+        sStats[email].total++;
+        if (isCorrect) sStats[email].correct++;
+        sStats[email].conf += confidence;
+        
+        if (termStats) {
+          logStudentAttempt(email, term, questionType, isCorrect, confidence, termStats.level);
+        }
+        
+        const termKey = `${term}_${email}`;
+        if (!processedTerms.has(termKey)) {
+          updateTermWithSM2(term, isCorrect, confidence, questionType);
+          processedTerms.add(termKey);
+        }
+      });
+    });
+    
+    updateOutputTable(ss, CONFIG.SHEET.STUDENT_STATS, sStats, true);
+    
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const masterData = masterSheet.getDataRange().getValues();
+    for (let i = 1; i < masterData.length; i++) {
+      if (masterData[i][CONFIG.COL.CURRENT_STATUS] === "Active") {
+        masterSheet.getRange(i + 1, CONFIG.COL.CURRENT_STATUS + 1).clearContent();
+      }
+    }
+    
+    Logger.log(`\n✅ Processed ${processedTerms.size} unique attempts`);
+    Logger.log(`✅ FIX #1: Confidence doesn't reveal answers`);
+    Logger.log(`✅ FIX #2: Only latest responses processed (${latestResponses.length} students)`);
+    Logger.log(`✅ FIX #3: Using static sheet (no column proliferation)`);
+    
+  } catch (e) {
+    handleError('processFormResponses', e);
+  }
+}
+/**
+ * FILE 2 CONTINUED: ADAPTIVE SELECTION & FORM SYNC
+ */
+
+// =============================================================================
+// PHASE 2.3: ADAPTIVE SELECTION ALGORITHM
+// =============================================================================
+
+/**
+ * Calculate priority score for word selection
+ */
+function calculateWordPriority(wordData, today) {
+  const leechThreshold = getConfig("LEECH_THRESHOLD", 3);
+  const strugglingAccuracy = getConfig("STRUGGLING_ACCURACY", 60);
+  const priorityBoostDays = getConfig("PRIORITY_BOOST_DAYS", 2);
+  
+  let score = 0;
+  let reasons = [];
+  
+  const accuracy = wordData.attempts > 0 ? (wordData.correct / wordData.attempts) * 100 : 100;
+  
+  // LEECH DETECTION (highest priority)
+  if (wordData.attempts >= leechThreshold && accuracy < strugglingAccuracy) {
+    const severity = Math.min(wordData.attempts / leechThreshold, 5);
+    score += 100 * severity;
+    reasons.push(`🔴 LEECH (${wordData.attempts} attempts, ${accuracy.toFixed(0)}% acc)`);
+  }
+  
+  // OVERDUE SEVERITY
+  if (wordData.nextReview) {
+    const nextReview = new Date(wordData.nextReview);
+    nextReview.setHours(0, 0, 0, 0);
+    const daysOverdue = Math.floor((today - nextReview) / (1000 * 60 * 60 * 24));
+    
+    if (daysOverdue > 0) {
+      score += Math.min(daysOverdue * 20, 150);
+      if (daysOverdue >= priorityBoostDays) {
+        reasons.push(`⏰ ${daysOverdue} days overdue`);
+      }
+    } else if (daysOverdue === 0) {
+      score += 50;
+    } else {
+      score += Math.max(0, 30 + daysOverdue * 5);
+    }
+  } else {
+    score += 75;
+    reasons.push("📅 No review date");
+  }
+  
+  // FORGETTING RISK
+  if (wordData.lastAttempt) {
+    const daysSince = Math.floor((today - new Date(wordData.lastAttempt)) / (1000 * 60 * 60 * 24));
+    const risk = (daysSince / 7) * (2.5 - wordData.easinessFactor) * 10;
+    score += risk;
+    if (risk > 15) reasons.push(`🧠 High forgetting risk`);
+  }
+  
+  // STREAK PROTECTION
+  if (wordData.streak >= 3 && wordData.nextReview) {
+    const daysUntil = Math.floor((new Date(wordData.nextReview) - today) / (1000 * 60 * 60 * 24));
+    if (daysUntil <= 1 && daysUntil >= -1) {
+      score += wordData.streak * 5;
+      reasons.push(`🔥 Protect ${wordData.streak}-streak`);
+    }
+  }
+  
+  // CRITICAL LEVEL
+  if (wordData.level === 3 || wordData.level === 4) {
+    score += 15;
+    if (wordData.level === 4) reasons.push("⭐ Boss Mode");
+  }
+  
+  // NEW WORD
+  if (wordData.level === 1 && wordData.attempts === 0) {
+    score += 40;
+    reasons.push("🆕 New word");
+  }
+  
+  // MASTERED (de-prioritize)
+  if (wordData.level >= 5) {
+    score -= 200;
+  }
+  
+  return {
+    score: Math.round(score),
+    reasons: reasons,
+    term: wordData.term,
+    level: wordData.level,
+    accuracy: accuracy.toFixed(1)
+  };
+}
+
+/**
+ * Get all eligible words with priority scores
+ */
+function getEligibleWordsWithPriority() {
+  const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+  const data = masterSheet.getDataRange().getValues();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  let words = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const wordData = {
+      term: data[i][CONFIG.COL.TERM],
+      definition: data[i][CONFIG.COL.DEFINITION],
+      category: data[i][CONFIG.COL.CATEGORY].toString().toLowerCase(),
+      level: data[i][CONFIG.COL.LEVEL] || 1,
+      nextReview: data[i][CONFIG.COL.NEXT_REVIEW],
+      attempts: data[i][CONFIG.COL.TOTAL_ATTEMPTS] || 0,
+      correct: data[i][CONFIG.COL.TOTAL_CORRECT] || 0,
+      easinessFactor: data[i][CONFIG.COL.EASINESS_FACTOR] || 2.5,
+      streak: data[i][CONFIG.COL.CONSECUTIVE_CORRECT] || 0,
+      lastAttempt: data[i][CONFIG.COL.LAST_ATTEMPT_DATE],
+      rowIndex: i + 1
+    };
+    
+    // Skip mastered words unless extremely overdue
+    if (wordData.level >= 5) {
+      const daysOverdue = wordData.nextReview ? 
+        Math.floor((today - new Date(wordData.nextReview)) / (1000 * 60 * 60 * 24)) : 0;
+      if (daysOverdue < 30) continue;
+    }
+    
+    const priority = calculateWordPriority(wordData, today);
+    words.push({ ...wordData, priority });
+  }
+  
+  return words;
+}
+
+/**
+ * Select words for quiz with diversity
+ */
+function selectAdaptiveWords(vocabCount = 6, grammarCount = 2) {
+  const words = getEligibleWordsWithPriority();
+  
+  const vocabWords = words.filter(w => w.category.includes('vocab'));
+  const grammarWords = words.filter(w => !w.category.includes('vocab'));
+  
+  vocabWords.sort((a, b) => b.priority.score - a.priority.score);
+  grammarWords.sort((a, b) => b.priority.score - a.priority.score);
+  
+  const selectedVocab = selectWithDiversity(vocabWords, vocabCount);
+  const selectedGrammar = selectWithDiversity(grammarWords, grammarCount);
+  
+  const selected = [...selectedVocab, ...selectedGrammar];
+  
+  Logger.log(`\n=== ADAPTIVE SELECTION ===`);
+  Logger.log(`Selected ${selected.length} words (${selectedVocab.length} vocab, ${selectedGrammar.length} grammar)`);
+  selected.forEach((w, i) => {
+    Logger.log(`${i + 1}. ${w.term} (L${w.level}, Score: ${w.priority.score})`);
+  });
+  
+  return selected;
+}
+
+function selectWithDiversity(words, count) {
+  if (words.length <= count) return words;
+  
+  const selected = [];
+  
+  // Critical words first (score >= 200)
+  const critical = words.filter(w => w.priority.score >= 200);
+  critical.slice(0, Math.min(critical.length, count)).forEach(w => selected.push(w));
+  
+  // Fill remaining with top priority
+  let pointer = 0;
+  while (selected.length < count && pointer < words.length) {
+    const word = words[pointer];
+    if (!selected.find(s => s.term === word.term)) {
+      selected.push(word);
+    }
+    pointer++;
+  }
+  
+  return selected.slice(0, count);
+}
+
+// =============================================================================
+// FORM SYNC WITH ADAPTIVE SELECTION
+// =============================================================================
+
+/**
+ * Sync quiz form with adaptive word selection
+ */
+/**
+ * FIXED: Form sync that doesn't reveal answers via confidence questions
+ */
+function syncSmartSRSForm_Adaptive() {
+  try {
+    const form = FormApp.openById(CONFIG.FORM_ID);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const bankSheet = getSheet(CONFIG.SHEET.QUESTION_BANK);
+    
+    // Archive responses
+    let respSheet = ss.getSheets().find(s => s.getFormUrl());
+    if (respSheet && respSheet.getLastRow() > 1) {
+      let archive = ss.getSheetByName(CONFIG.SHEET.RESPONSE_ARCHIVE) || 
+                    ss.insertSheet(CONFIG.SHEET.RESPONSE_ARCHIVE);
+      archive.appendRow([`=== ${new Date().toLocaleString()} ===`]);
+      respSheet.getDataRange().getValues().forEach(row => archive.appendRow(row));
+      archive.appendRow([]);
+      form.deleteAllResponses();
+    }
+    
+    form.setIsQuiz(true);
+    form.setCollectEmail(true);
+    form.setAllowResponseEdits(false); // FIX #2: Prevent edits
+    
+    const vocabCount = getConfig("VOCAB_QUESTIONS_PER_QUIZ", 6);
+    const grammarCount = getConfig("GRAMMAR_QUESTIONS_PER_QUIZ", 2);
+    const bossLevel = getConfig("BOSS_MODE_LEVEL", 4);
+    
+    const selectedWords = selectAdaptiveWords(vocabCount, grammarCount);
+    
+    if (selectedWords.length === 0) {
+      SpreadsheetApp.getUi().alert("⚠️ No words available.");
+      return;
+    }
+    
+    const shuffled = shuffle(selectedWords);
+    
+    // Clear form
+    let items = form.getItems();
+    for (let i = items.length - 1; i >= 0; i--) form.deleteItem(items[i]);
+    
+    const bankData = bankSheet.getDataRange().getValues();
+    let termOrder = [];
+    
+    shuffled.forEach((wordData, index) => {
+      masterSheet.getRange(wordData.rowIndex, CONFIG.COL.CURRENT_STATUS + 1).setValue("Active");
+      termOrder.push(wordData.term);
+      
+      let pool = bankData.filter(row => 
+        row[0].toString().toLowerCase() === wordData.term.toLowerCase()
+      );
+      
+      if (pool.length > 0) {
+        let q = pool[Math.floor(Math.random() * pool.length)];
+        
+        if (wordData.level >= bossLevel) {
+          form.addTextItem()
+            .setTitle(`[${index + 1}] Type the word: "${q[1]}"`)
+            .setPoints(2)
+            .setRequired(true);
+        } else {
+          let mc = form.addMultipleChoiceItem()
+            .setTitle(`[${index + 1}] ${q[1]}`)
+            .setPoints(1)
+            .setRequired(true);
+          let choices = [q[2], q[3], q[4], q[5]].map(c => mc.createChoice(c, (c === q[6])));
+          mc.setChoices(choices);
+        }
+        
+        // FIX #1: Generic confidence (doesn't reveal answer)
+        form.addScaleItem()
+          .setTitle(`[${index + 1}] Confidence?`)
+          .setHelpText("Rate your confidence in the answer above")
+          .setBounds(1, 5)
+          .setLabels("Guessed", "Sure")
+          .setRequired(true);
+      }
+    });
+    
+    // Reflection
+    form.addSectionHeaderItem().setTitle("🧠 Weekly Reflection");
+    form.addParagraphTextItem()
+      .setTitle("Pick ONE word. How does it relate to our reading or events?")
+      .setRequired(true);
+    
+    // Save term order
+    let orderSheet = ss.getSheetByName("Quiz_Term_Order") || ss.insertSheet("Quiz_Term_Order");
+    orderSheet.clear();
+    orderSheet.getRange(1, 1, 1, 2).setValues([["Quiz_Date", "Term_Order"]]);
+    orderSheet.getRange(2, 1, 1, 2).setValues([[new Date(), termOrder.join(",")]]);
+    
+    const leechCount = shuffled.filter(w => 
+      w.priority.reasons.some(r => r.includes('LEECH'))
+    ).length;
+    
+    let msg = `✅ Quiz Synced!\n\n${shuffled.length} words selected`;
+    if (leechCount > 0) msg += `\n${leechCount} struggling words prioritized`;
+    msg += `\n\n🔒 Edits disabled\n📝 Confidence questions won't reveal answers`;
+    
+    SpreadsheetApp.getUi().alert(msg);
+    
+  } catch (e) {
+    handleError('syncForm', e);
+  }
+}
+
+// =============================================================================
+// DIAGNOSTIC TOOLS
+// =============================================================================
+
+/**
+ * Preview what would be selected
+ */
+function previewNextQuiz() {
+  try {
+    Logger.log("\n=== NEXT QUIZ PREVIEW ===\n");
+    
+    const vocabCount = getConfig("VOCAB_QUESTIONS_PER_QUIZ", 6);
+    const grammarCount = getConfig("GRAMMAR_QUESTIONS_PER_QUIZ", 2);
+    
+    const selected = selectAdaptiveWords(vocabCount, grammarCount);
+    
+    Logger.log(`Selected ${selected.length} words:\n`);
+    selected.forEach((w, i) => {
+      Logger.log(`${i + 1}. ${w.term}`);
+      Logger.log(`   Level: ${w.level} | Priority: ${w.priority.score}`);
+      Logger.log(`   Why: ${w.priority.reasons.join(', ') || 'Due for review'}\n`);
+    });
+    
+    SpreadsheetApp.getUi().alert('Preview complete! Check View → Logs');
+    
+  } catch (e) {
+    handleError('previewNextQuiz', e);
+  }
+}
+
+/**
+ * Identify leech words
+ */
+function identifyLeeches() {
+  try {
+    const masterSheet = getSheet(CONFIG.SHEET.VOCAB_MASTER);
+    const data = masterSheet.getDataRange().getValues();
+    
+    const leechThreshold = getConfig("LEECH_THRESHOLD", 3);
+    const strugglingAccuracy = getConfig("STRUGGLING_ACCURACY", 60);
+    
+    let leeches = [];
+    
+    for (let i = 1; i < data.length; i++) {
+      const term = data[i][CONFIG.COL.TERM];
+      const attempts = data[i][CONFIG.COL.TOTAL_ATTEMPTS] || 0;
+      const correct = data[i][CONFIG.COL.TOTAL_CORRECT] || 0;
+      const accuracy = attempts > 0 ? (correct / attempts) * 100 : 100;
+      
+      if (attempts >= leechThreshold && accuracy < strugglingAccuracy) {
+        leeches.push({
+          term,
+          attempts,
+          accuracy: accuracy.toFixed(1),
+          severity: attempts / leechThreshold
+        });
+      }
+    }
+    
+    leeches.sort((a, b) => b.severity - a.severity);
+    
+    Logger.log("\n=== LEECH ANALYSIS ===\n");
+    Logger.log(`Found ${leeches.length} leech words:\n`);
+    
+    leeches.forEach((l, i) => {
+      Logger.log(`${i + 1}. ${l.term}`);
+      Logger.log(`   ${l.attempts} attempts | ${l.accuracy}% accuracy`);
+      Logger.log(`   Severity: ${l.severity.toFixed(1)}x\n`);
+    });
+    
+    if (leeches.length === 0) {
+      Logger.log("✅ No leeches detected!");
+    }
+    
+    SpreadsheetApp.getUi().alert(
+      leeches.length > 0 
+        ? `Found ${leeches.length} leech words. Check logs.`
+        : "✅ No leeches! All words progressing well."
+    );
+    
+  } catch (e) {
+    handleError('identifyLeeches', e);
+  }
+}
+
+function explainSelectionLogic() {
+  try {
+    const words = getEligibleWordsWithPriority();
+    words.sort((a, b) => b.priority.score - a.priority.score);
+    
+    Logger.log("\n=== SELECTION LOGIC ===\n");
+    Logger.log("Top 10 Priority Words:\n");
+    
+    words.slice(0, 10).forEach((w, i) => {
+      Logger.log(`${i + 1}. ${w.term} (L${w.level})`);
+      Logger.log(`   Score: ${w.priority.score}`);
+      Logger.log(`   Reasons: ${w.priority.reasons.join(', ') || 'Standard'}\n`);
+    });
+    
+    SpreadsheetApp.getUi().alert('Explanation complete! Check View → Logs');
+    
+  } catch (e) {
+    handleError('explainSelectionLogic', e);
+  }
+}
+
+/**
+ * HELPER 1: Get latest response per student (fixes edit issue)
+ */
+function getLatestResponsePerStudent(respData) {
+  const latestByEmail = {};
+  
+  for (let i = 1; i < respData.length; i++) {
+    const email = respData[i][1].toString().trim().toLowerCase();
+    const timestamp = new Date(respData[i][0]);
+    
+    if (!latestByEmail[email] || timestamp > new Date(latestByEmail[email].timestamp)) {
+      latestByEmail[email] = {
+        rowIndex: i,
+        timestamp: respData[i][0],
+        data: respData[i]
+      };
+    }
+  }
+  
+  return Object.values(latestByEmail);
+}
+
+/**
+ * HELPER 2: Copy responses to static sheet (fixes column issue)
+ */
+function copyResponsesToStaticSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  let formSheet = ss.getSheets().find(s => s.getFormUrl());
+  if (!formSheet || formSheet.getLastRow() < 2) {
+    Logger.log("No responses to copy");
+    return;
+  }
+  
+  let staticSheet = ss.getSheetByName("Static_Quiz_Responses");
+  if (!staticSheet) {
+    staticSheet = ss.insertSheet("Static_Quiz_Responses");
+    const headers = [
+      "Timestamp", "Email",
+      "Q1_Answer", "Q1_Confidence",
+      "Q2_Answer", "Q2_Confidence",
+      "Q3_Answer", "Q3_Confidence",
+      "Q4_Answer", "Q4_Confidence",
+      "Q5_Answer", "Q5_Confidence",
+      "Q6_Answer", "Q6_Confidence",
+      "Q7_Answer", "Q7_Confidence",
+      "Q8_Answer", "Q8_Confidence",
+      "Reflection"
+    ];
+    staticSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    staticSheet.getRange(1, 1, 1, headers.length)
+      .setBackground("#4285f4")
+      .setFontColor("white")
+      .setFontWeight("bold");
+  }
+  
+  const orderSheet = ss.getSheetByName("Quiz_Term_Order");
+  if (!orderSheet || orderSheet.getLastRow() < 2) {
+    throw new Error("Quiz_Term_Order not found");
+  }
+  
+  const termOrderStr = orderSheet.getRange(2, 2).getValue();
+  const activeTerms = termOrderStr.split(",").map(t => t.trim());
+  
+  const formData = formSheet.getDataRange().getValues();
+  
+  if (staticSheet.getLastRow() > 1) {
+    staticSheet.deleteRows(2, staticSheet.getLastRow() - 1);
+  }
+  
+  for (let i = 1; i < formData.length; i++) {
+    let staticRow = [formData[i][0], formData[i][1]];
+    
+    let colIndex = 2;
+    activeTerms.forEach(term => {
+      if (colIndex < formData[i].length) {
+        staticRow.push(formData[i][colIndex]);
+        staticRow.push(formData[i][colIndex + 1]);
+        colIndex += 2;
+      } else {
+        staticRow.push("", "");
+      }
+    });
+    
+    while (staticRow.length < 18) {
+      staticRow.push("");
+    }
+    
+    const reflectionCol = formData[0].length - 1;
+    staticRow.push(formData[i][reflectionCol] || "");
+    
+    staticSheet.appendRow(staticRow);
+  }
+  
+  Logger.log(`✅ Copied ${formData.length - 1} responses`);
+}
+
+function emergencyFix() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName("Vocab_Master");
+  const data = master.getDataRange().getValues();
+  
+  let fixed = 0;
+  
+  // Clear Next_Review for first 15 words (Level 1-4)
+  for (let i = 1; i < data.length && fixed < 15; i++) {
+    const level = data[i][4] || 1;
+    if (level < 5) {
+      master.getRange(i + 1, 6).clearContent(); // Clear column F (Next_Review)
+      fixed++;
+    }
+  }
+  
+  // If still not enough, reset some Level 5 words
+  if (fixed < 8) {
+    for (let i = 1; i < data.length && fixed < 15; i++) {
+      if (data[i][4] === 5) {
+        master.getRange(i + 1, 5).setValue(3); // Reset to Level 3
+        master.getRange(i + 1, 6).clearContent();
+        fixed++;
+      }
+    }
+  }
+  
+  SpreadsheetApp.getUi().alert(
+    `✅ Fixed!\n\nMade ${fixed} words available.\n\nTry syncing form now.`
+  );
+}
